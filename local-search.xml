@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<search>
+  
+  
+  
+  <entry>
+    <title>clickhouse学习笔记--查询过程</title>
+    <link href="/2021/08/31/clickhouse%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0--%E6%9F%A5%E8%AF%A2%E8%BF%87%E7%A8%8B/"/>
+    <url>/2021/08/31/clickhouse%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0--%E6%9F%A5%E8%AF%A2%E8%BF%87%E7%A8%8B/</url>
+    
+    <content type="html"><![CDATA[]]></content>
+    
+    
+    
+  </entry>
+  
+  
+  
+  <entry>
+    <title>clickhouse 连接数打满错误排查</title>
+    <link href="/2021/08/30/clickhouse%E8%BF%9E%E6%8E%A5%E6%95%B0%E6%89%93%E6%BB%A1%E9%94%99%E8%AF%AF%E6%8E%92%E6%9F%A5/"/>
+    <url>/2021/08/30/clickhouse%E8%BF%9E%E6%8E%A5%E6%95%B0%E6%89%93%E6%BB%A1%E9%94%99%E8%AF%AF%E6%8E%92%E6%9F%A5/</url>
+    
+    <content type="html"><![CDATA[<h2 id="问题"><a href="#问题" class="headerlink" title="问题"></a>问题</h2><p>今日线上的clickhouse集群突然出现查询失败的问题，查询日志发现是连接数打满了</p><figure class="highlight apache"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><code class="hljs apache"><span class="hljs-attribute">2021</span>.<span class="hljs-number">08</span>.<span class="hljs-number">30</span> <span class="hljs-number">15</span>:<span class="hljs-number">25</span>:<span class="hljs-number">14</span>.<span class="hljs-number">170792</span><span class="hljs-meta"> [ 213608 ] &#123;2610b4e7-d51a-43ad-856d-84bc0e502ccb&#125; &lt;Error&gt; executeQuery: Code: 202, e.displayText() = DB::Exception: Received from 100.65.15.93:9000. DB::Exception: Too many simultaneous queries. Maximum: 100. Stack trace:  </span><br></code></pre></td></tr></table></figure><h2 id="定位"><a href="#定位" class="headerlink" title="定位"></a>定位</h2><h3 id="原因"><a href="#原因" class="headerlink" title="原因"></a>原因</h3><p>clickhouse在集群部署时可以修改配置最大并发查询参数, 当超过最大并发查询参数时就会直接提示异常，并且服务会挂掉<a href="https://stackoverflow.com/questions/43033077/too-many-simultaneous-queries-in-clickhouse">(参考: too many simulataneous)</a></p><figure class="highlight xml"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><code class="hljs xml"><span class="hljs-tag">&lt;<span class="hljs-name">max_concurrent_queries</span>&gt;</span>100<span class="hljs-tag">&lt;/<span class="hljs-name">max_concurrent_queries</span>&gt;</span><br></code></pre></td></tr></table></figure><h3 id="Why-限制高并发"><a href="#Why-限制高并发" class="headerlink" title="Why 限制高并发"></a>Why 限制高并发</h3><p>因为clickhouse的查询会消耗大量CPU资源，当查询数过多时，CPU资源不够用就会导致查询速度变慢，查询排队挤压，内存溢出，服务器就会被打挂了(todo 还需要深入学习clickhouse的查询过程)</p><h3 id="How-高并发"><a href="#How-高并发" class="headerlink" title="How 高并发"></a>How 高并发</h3><p>由于高并发的限制，所以我们在应用场景中尽量避免出现高并发的查询场景。这个时候我们可以查询clickhouse system.query_log表<a href="https://clickhouse.tech/docs/zh/operations/system-tables/query_log/">(详细介绍)</a>，query_log表中包含了所有的查询相关的信息，例如：开始时间、处理持续时间、错误消息等。我们可以从这张表中查询出发生故障时间点的查询语句。</p><figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><code class="hljs sql"><span class="hljs-comment">-- 查询故障时间在执行的sql</span><br><span class="hljs-keyword">select</span> query_start_time, query_duration_ms <span class="hljs-operator">/</span> <span class="hljs-number">1000</span> <span class="hljs-operator">/</span> <span class="hljs-number">60</span>, event_time, query <br><span class="hljs-keyword">from</span> system.query_log <br><span class="hljs-keyword">where</span> query_start_time <span class="hljs-operator">&lt;=</span> toDateTime(<span class="hljs-string">&#x27;2021-08-30 15:25:15&#x27;</span>) <br><span class="hljs-keyword">and</span> event_time <span class="hljs-operator">&gt;=</span> toDateTime(<span class="hljs-string">&#x27;2021-08-30 15:25:15&#x27;</span>) <br><span class="hljs-keyword">order</span> <span class="hljs-keyword">by</span> query_start_time;<br></code></pre></td></tr></table></figure><p><img src="../images/query_log%E8%BF%94%E5%9B%9Erows.png" alt="返回结果"><br>查看返回结果可知在当前这一时刻出现了100条（时间误差只看到了99条，可以拉开时间线观察），因此可知确实是由于同一时刻查询并发数达到了clickhouse的限制，出现问题。</p><h2 id="解决"><a href="#解决" class="headerlink" title="解决"></a>解决</h2><p>通过对并发的sql进行分析，可以看到相同sql出现的次数比较高，并且查询的时间很长，出现了慢查询<br><img src="../images/query_log%E6%9F%A5%E8%AF%A2.png" alt="query_log"></p><h3 id="暴力解决"><a href="#暴力解决" class="headerlink" title="暴力解决"></a>暴力解决</h3><p>修改clickhouse的并发数限制</p><h3 id="优化查询语句"><a href="#优化查询语句" class="headerlink" title="优化查询语句"></a>优化查询语句</h3><ol><li>通过query_log数据表定位到查询时间长并且查询频次高的sql</li><li>打开debug日志</li><li>执行该sql，发现只命中了一个索引(key condition &amp; minmax condition)，但是当前索引的查询数据集太大，每次会查询1.4billion 数据，所以需要对其他查询字段优化<figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br></pre></td><td class="code"><pre><code class="hljs sql"><span class="hljs-comment">-- 打开debug日志</span><br><span class="hljs-keyword">set</span> send_logs_level<span class="hljs-operator">=</span><span class="hljs-string">&#x27;debug&#x27;</span>;<br><span class="hljs-comment">-- 执行sql, 未命中到索引</span><br><span class="hljs-keyword">SELECT</span> <br>    partition_time <span class="hljs-keyword">AS</span> ds, <br>    type<br><span class="hljs-keyword">FROM</span> tab<br><span class="hljs-keyword">WHERE</span> (partition_time <span class="hljs-operator">&gt;=</span> <span class="hljs-number">20210823</span>) <br>    <span class="hljs-keyword">AND</span> (partition_time <span class="hljs-operator">&lt;=</span> <span class="hljs-number">20210829</span>) <br>    <span class="hljs-keyword">AND</span> (<span class="hljs-keyword">set</span> <span class="hljs-keyword">IN</span> (<span class="hljs-number">27</span>)) <br>    <span class="hljs-keyword">AND</span> (type <span class="hljs-keyword">IN</span> (<span class="hljs-number">0</span>)) <br>    <span class="hljs-keyword">AND</span> (scene <span class="hljs-keyword">IN</span> (<span class="hljs-number">1</span>))<br><span class="hljs-keyword">GROUP</span> <span class="hljs-keyword">BY</span> <br>    partition_time, <br>    type<br><span class="hljs-comment">-- Key condition: (column 6 in 1-element set), unknown, unknown, and, (column 0 in 1-element set), and, unknown, and, and, (column 6 in 1-element set), and</span><br><span class="hljs-comment">-- MinMax index condition: unknown, (column 0 in [20210823, +inf)), (column 0 in (-inf, 20210829]), and, unknown, and, unknown, and, and, unknown, and</span><br></code></pre></td></tr></table></figure></li></ol><h3 id="知识点"><a href="#知识点" class="headerlink" title="知识点"></a>知识点</h3><ul><li><p>为什么clickhouse不支持高并发的场景</p></li><li><p>怎么对当前场景做保护</p></li><li><p>clickhouse的查询过程是什么，怎么对查询数保护？</p><ol><li>client发送查询到clickhouse服务</li><li>clickhouse根据负载均衡策略，选取一个请求节点</li><li>查询语句请求到clickhouse集群所有分片查询数据</li><li>将分片查询出来的数据合并返回给客户端</li></ol></li></ul>]]></content>
+    
+    
+    
+  </entry>
+  
+  
+  
+  <entry>
+    <title>clickhouse学习笔记--MergeTree</title>
+    <link href="/2021/08/30/clickhouse%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0--mergeTree/"/>
+    <url>/2021/08/30/clickhouse%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0--mergeTree/</url>
+    
+    <content type="html"><![CDATA[<h3 id="背景"><a href="#背景" class="headerlink" title="背景"></a>背景</h3>]]></content>
+    
+    
+    
+  </entry>
+  
+  
+  
+  <entry>
+    <title>clickhouse学习笔记--磁盘篇</title>
+    <link href="/2021/08/30/clickhouse%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0%EF%BC%88%E4%B8%80%EF%BC%89/"/>
+    <url>/2021/08/30/clickhouse%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0%EF%BC%88%E4%B8%80%EF%BC%89/</url>
+    
+    <content type="html"><![CDATA[<h3 id="背景"><a href="#背景" class="headerlink" title="背景"></a>背景</h3>]]></content>
+    
+    
+    
+  </entry>
+  
+  
+  
+  <entry>
+    <title>Hello World</title>
+    <link href="/2021/08/30/hello-world/"/>
+    <url>/2021/08/30/hello-world/</url>
+    
+    <content type="html"><![CDATA[<p>Welcome to <a href="https://hexo.io/">Hexo</a>! This is your very first post. Check <a href="https://hexo.io/docs/">documentation</a> for more info. If you get any problems when using Hexo, you can find the answer in <a href="https://hexo.io/docs/troubleshooting.html">troubleshooting</a> or you can ask me on <a href="https://github.com/hexojs/hexo/issues">GitHub</a>.</p><h2 id="Quick-Start"><a href="#Quick-Start" class="headerlink" title="Quick Start"></a>Quick Start</h2><h3 id="Create-a-new-post"><a href="#Create-a-new-post" class="headerlink" title="Create a new post"></a>Create a new post</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">$ hexo new <span class="string">&quot;My New Post&quot;</span></span><br></pre></td></tr></table></figure><p>More info: <a href="https://hexo.io/docs/writing.html">Writing</a></p><h3 id="Run-server"><a href="#Run-server" class="headerlink" title="Run server"></a>Run server</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">$ hexo server</span><br></pre></td></tr></table></figure><p>More info: <a href="https://hexo.io/docs/server.html">Server</a></p><h3 id="Generate-static-files"><a href="#Generate-static-files" class="headerlink" title="Generate static files"></a>Generate static files</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">$ hexo generate</span><br></pre></td></tr></table></figure><p>More info: <a href="https://hexo.io/docs/generating.html">Generating</a></p><h3 id="Deploy-to-remote-sites"><a href="#Deploy-to-remote-sites" class="headerlink" title="Deploy to remote sites"></a>Deploy to remote sites</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">$ hexo deploy</span><br></pre></td></tr></table></figure><p>More info: <a href="https://hexo.io/docs/one-command-deployment.html">Deployment</a></p>]]></content>
+    
+    
+    
+  </entry>
+  
+  
+  
+  
+</search>
