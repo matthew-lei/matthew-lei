@@ -103,5 +103,5 @@ theme: landscape
 ## Docs: https://hexo.io/docs/one-command-deployment
 deploy:
   type: git
-  repository: https://github.com/matthew-lei/matthew-lei.git
+  repository: git@github.com:matthew-lei/matthew-lei.git
   branch: master
